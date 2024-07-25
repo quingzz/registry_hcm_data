@@ -1,0 +1,8 @@
+project:
+  title: "registry_hcm_data"
+
+editor: visual
+
+format:
+  html:
+    theme: [cosmo, theme.scss]
