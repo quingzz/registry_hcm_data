@@ -21,8 +21,9 @@ measles_coverage <- measles_coverage %>% mutate(age_group = factor(age_group)) %
 ```{r, echo=FALSE}
 download_this(
   measles_coverage,
+  button_label = "Download measles coverage data",
   output_name = "measles_coverage_data",
-  output_extension = ".csv",
+  output_extension = ".rds",
   button_type = "primary",
   has_icon = TRUE,
   icon = "fa fa-save"

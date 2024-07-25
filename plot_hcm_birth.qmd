@@ -20,6 +20,7 @@ birth_data <- readRDS("data/hcm_birth_data.rds")
 ```{r, echo=FALSE}
 download_this(
   birth_data,
+  button_label = "Download Ho Chi Minh birth data",
   output_name = "hcm_birth_data",
   output_extension = ".rds",
   button_type = "primary",
