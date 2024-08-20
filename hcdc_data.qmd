@@ -1,0 +1,447 @@
+---
+title: "HCDC vs NIHE data"
+page-navigation: true
+toc: true
+format: 
+  html:
+    embed-resources: true
+---
+
+```{r,echo=FALSE, warning=FALSE, output=FALSE}
+library(readxl)
+library(tidyverse)
+library(plotly)
+library(sf)
+library(leaflet)
+library(leafpop)
+library(stringi)
+```
+
+```{r, echo = FALSE, output=FALSE}
+# Read and preprocess data
+hcdc_data <- read_excel(file.path("TCMR", "soi_2016-2024.xlsx"), col_types = "text")
+
+hcdc_data <- hcdc_data %>% 
+  mutate(
+    namsinh = as.numeric(namsinh),
+    # 1899-12-30 is the origin date for excel
+    ngaysinh = as.Date(as.numeric(ngaysinh), origin = "1899-12-30"),
+    soi1 = as.Date(as.numeric(soi1), origin = "1899-12-30"),
+    soi2 = as.Date(as.numeric(soi2), origin = "1899-12-30")
+  ) 
+
+# Read and preprocess map data 
+hcm_map <- st_read("data/gadm41_VNM_2.json") %>% filter(NAME_1 == "HồChíMinh")
+
+# Handle the TP Thu Duc situation
+thuduc_subset <- (hcm_map$VARNAME_2 == "District2" | hcm_map$VARNAME_2 == "District9" | 
+             hcm_map$VARNAME_2 == "ThuDuc" )
+# merge d2, d9, ThuDuc into ThuDuc city
+hcm_map[hcm_map$VARNAME_2 == "ThuDuc", "geometry"] <- st_union( subset(hcm_map, thuduc_subset)$geometry )
+# remove d2 and d9 from map data
+hcm_map <- subset(hcm_map, !(hcm_map$VARNAME_2 == "District2" | hcm_map$VARNAME_2 == "District9"))
+
+# st_write(hcm_map, "merged_thuduc.geojson")
+```
+
+```{r, echo = FALSE, output=FALSE}
+# Compute coverage
+coverage <- hcdc_data %>% 
+  group_by(namsinh, qh) %>% 
+  summarise(
+    no_birth = n(),
+    # number of children vaccinated, regardless of time of vaccination
+    anyshot = sum(!is.na(soi1) | !is.na(soi2)),
+    # only count shots within 1 year of birth
+    within1year = sum(
+      (!is.na(soi1) & (year(soi1) - namsinh) <= 1 ) |
+         (!is.na(soi2) & (year(soi2) - namsinh) <= 1)
+      )
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    coverage = anyshot/no_birth
+  )
+
+write_csv(coverage, "data/hcdc_coverage_data.csv")
+```
+
+## Compare births from HCDC vs Registry
+
+Some findings:
+
+-   NIHE data have higher birth counts in 2016 - 2018 which contributes to lower coverage (2022, 2014 low counts are due to incomplete data collection). This maybe an indication that the threshold for duplicate matching is too high (but lowering it may impact result for 2019-2021)
+
+-   Discrepancies diminishes overtime (NIHE even slightly under under reported number of births for some districts by 2021)
+
+-   Over-reported (compared to HCDC) birth counts in NIHE happen accross all districts (except Hoc Mon)
+
+::: panel-tabset
+### All
+
+```{r, echo=FALSE}
+registry_birth_data <- readRDS("data/hcm_birth_data.rds")
+
+# plot discrepancies in birth count between NIHE and HCDC data over time
+ggplotly(
+  ggplot() +
+    geom_line(aes(x = namsinh, y = birth_count, color = "hcdc"), 
+              data = hcdc_data %>% 
+                group_by(
+                  namsinh
+                ) %>% 
+                summarize(birth_count = n())
+              ) +
+    geom_line(aes(x = birth_year, y = birth_count, color = "registry"), 
+              data =  registry_birth_data %>% 
+                group_by(birth_year) %>% 
+                summarize(birth_count = sum(n))
+            ) +
+    labs(
+      x = "Year of birth",
+      y = "Number of births"
+    ) +
+  scale_color_manual(
+    values = c("hcdc" = "red", "registry" = "blueviolet")
+  )
+)
+```
+
+###  By district
+
+*Click on the district to view number of births over the year for that district*
+
+**Note:** $Ratio = \frac{\text{Total births from NIHE}}{\text{Total births from HCDC data}}$
+
+```{r, echo = FALSE}
+# try plotting it geographically
+# compute birth count from registry vs hcdc data grouped by district
+count_by_district <- hcdc_data %>%  
+  group_by(
+    namsinh, qh 
+  ) %>%
+  summarize(hcdc_count = n()) %>% 
+  full_join(
+    # left join with birth count in registry
+    registry_birth_data %>% 
+      mutate(
+        # update district name for d2 and d9
+         district_reg = if_else(
+           district_reg == "Quận 2"|district_reg == "Quận 9", "Thủ Đức", district_reg)
+      ) %>% 
+      group_by(birth_year, district_reg) %>% 
+      summarize(registry_count = sum(n)),
+    by = join_by(qh == district_reg, namsinh == birth_year)
+  ) %>% filter(
+    namsinh >= 2016 & namsinh <= 2021
+  ) %>% 
+  ungroup() %>% 
+  mutate( 
+    # prepare key to join with HCM map
+    joinkey = tolower(stri_trans_general(qh, "latin-ascii")),
+    joinkey = str_replace(joinkey, "quan", "district"),
+    joinkey = str_remove_all(joinkey, "\\s")
+  )
+
+# generate plot of birth count for each district
+to_plot <- count_by_district %>% 
+  group_by(qh, joinkey) %>% 
+  do(
+    registry_hcdc_ratio = sum(.$registry_count)/sum(.$hcdc_count),
+    birth_count_plot = ggplot(.) +
+      geom_line(aes(x = namsinh, y = hcdc_count, color = "hcdc")) +
+      geom_line(aes(x = namsinh, y = registry_count, color = "registry")) +
+      labs(
+        x = "Year of birth",
+        y = "Number of births"
+      ) +
+      scale_color_manual(
+        values = c("hcdc" = "red", "registry" = "blueviolet")
+      )
+  ) 
+# reformat ratio
+to_plot$registry_hcdc_ratio <- unlist(to_plot$registry_hcdc_ratio)
+
+to_plot <- hcm_map %>% 
+  mutate(
+    VARNAME_2 = tolower(VARNAME_2)
+  ) %>% 
+  full_join(
+    to_plot,
+    by = join_by(VARNAME_2 == joinkey)
+  )
+
+# prepare palette 
+pal <- colorNumeric(palette = c("#a7c4f2", "#75aaff", "#204d96"), domain = to_plot$registry_hcdc_ratio)
+labels <- sprintf("<strong> %s </strong> <br/> Count ratio: %f", to_plot$NAME_2, to_plot$registry_hcdc_ratio) %>%
+    lapply(htmltools::HTML)
+
+# plot count ratio and discrepencies overtime per 
+to_plot %>% 
+  leaflet() %>% 
+  addPolygons(color = "grey", weight = 1, label = labels,
+                fillColor = ~pal(registry_hcdc_ratio), fillOpacity = 0.8, group = "birth_count") %>%
+    addLegend(pal = pal, values = ~registry_hcdc_ratio, opacity = 0.5, title = "Ratio", position = "bottomright") %>% 
+  addPopupGraphs(to_plot$birth_count_plot, group = "birth_count", width = 600, height = 400)
+```
+
+### Data table
+
+```{r}
+rmarkdown::paged_table(count_by_district %>% select(-joinkey))
+```
+:::
+
+## Compare vaccinated children count from HCDC vs Registry
+
+Some findings:
+
+-   Records from NIHE show lower vaccinated population compared to HCDC data, especially in 2016-2018 and 2021 which further contribute to the discrepancies in coverage for those years in particular
+-   Similar to birth counts, the discrepancies between HCDC and NIHE count can be found across all districts
+-   The vaccinated population for District 1 is the most consistent between HCDC and NIHE
+
+```{r, echo=FALSE, output = FALSE}
+measles_coverage <- read_csv("data/measles_coverage_data.csv")
+```
+
+::: panel-tabset
+### All
+
+```{r, echo=FALSE}
+ggplotly(
+  ggplot() +
+    geom_line(aes(x = namsinh, y = vaccount, color = "hcdc"),
+              data = coverage %>% group_by(namsinh) %>% 
+                summarize(vaccount = sum(anyshot)) 
+              ) +
+    geom_line(aes(x = birth_year, y = vaccount, color = "registry"),
+              data = measles_coverage %>% filter(age_group == "all") %>% 
+                group_by(birth_year) %>% 
+                summarize(vaccount = sum(any_shot))
+              )+
+  scale_color_manual(
+    values = c("hcdc" = "red", "registry" = "blueviolet")
+  )
+)
+```
+
+### By district
+
+*Click on the district to view number of vaccinated children over the year for that district*
+
+**Note:**
+
+$Ratio = \frac{\text{Vaccinated children from NIHE}}{\text{Vaccinated children from HCDC data}}$
+
+```{r, echo=FALSE}
+# Create geo plot for vaccination count discrepancies
+# Similar to the code for comparing birth count
+vacc_by_district <- coverage %>%  
+  rename(hcdc_count = anyshot) %>% 
+  full_join(
+    # left join with vaccination from registry
+    measles_coverage %>% filter(age_group == "all") %>% 
+      mutate(
+        # update district name for d2 and d9
+         district = if_else(
+           district == "Quận 2"|district == "Quận 9", "Thủ Đức", district)
+      ) %>% 
+      group_by(
+        birth_year, district
+      ) %>% summarize(
+        registry_count = sum(any_shot)
+      ),
+    by = join_by(qh == district, namsinh == birth_year)
+  ) %>% 
+  select(namsinh, qh, hcdc_count, registry_count) %>% filter(
+    namsinh >= 2016 & namsinh <= 2021
+  ) %>% 
+  ungroup() %>% 
+  mutate( 
+    # prepare key to join with HCM map
+    joinkey = tolower(stri_trans_general(qh, "latin-ascii")),
+    joinkey = str_replace(joinkey, "quan", "district"),
+    joinkey = str_remove_all(joinkey, "\\s")
+  )
+
+# generate plot of birth count for each district
+to_plot <- vacc_by_district %>% 
+  group_by(qh, joinkey) %>% 
+  do(
+    registry_hcdc_ratio = sum(.$registry_count)/sum(.$hcdc_count),
+    birth_count_plot = ggplot(.) +
+      geom_line(aes(x = namsinh, y = hcdc_count, color = "hcdc")) +
+      geom_line(aes(x = namsinh, y = registry_count, color = "registry")) +
+      labs(
+        x = "Year of birth",
+        y = "Number of vaccinated children"
+      ) +
+      scale_color_manual(
+        values = c("hcdc" = "red", "registry" = "blueviolet")
+      )
+  ) 
+# reformat ratio
+to_plot$registry_hcdc_ratio <- unlist(to_plot$registry_hcdc_ratio)
+
+to_plot <- hcm_map %>% 
+  mutate(
+    VARNAME_2 = tolower(VARNAME_2)
+  ) %>% 
+  full_join(
+    to_plot,
+    by = join_by(VARNAME_2 == joinkey)
+  )
+
+# prepare palette 
+pal <- colorNumeric(palette = c("#a7c4f2", "#75aaff", "#204d96"), domain = to_plot$registry_hcdc_ratio)
+labels <- sprintf("<strong> %s </strong> <br/> Count ratio: %f", to_plot$NAME_2, to_plot$registry_hcdc_ratio) %>%
+    lapply(htmltools::HTML)
+
+# plot count ratio and discrepencies overtime per 
+to_plot %>% 
+  leaflet() %>% 
+  addPolygons(color = "grey", weight = 1, label = labels,
+                fillColor = ~pal(registry_hcdc_ratio), fillOpacity = 0.8, group = "vacc_count") %>%
+    addLegend(pal = pal, values = ~registry_hcdc_ratio, opacity = 0.5, title = "Ratio", position = "bottomright") %>% 
+  addPopupGraphs(to_plot$birth_count_plot, group = "vacc_count", width = 600, height = 400)
+```
+
+### Data table
+
+```{r}
+rmarkdown::paged_table(vacc_by_district %>% select(-joinkey))
+```
+:::
+
+## NIHE coverage vs HCDC coverage
+
+::: panel-tabset
+### Discrepancy by District
+
+Discrepancy between coverage calculated from HCDC and NIHE is consistent across all districts
+
+```{r, echo=FALSE}
+# recompute measles coverage for Thu Duc
+recompute_measles <- measles_coverage %>% 
+  filter(age_group == "all") %>% 
+  mutate(
+    district = if_else(
+           district == "Quận 2"|district == "Quận 9", "Thủ Đức", district)
+  ) %>% 
+  group_by(
+    district, birth_year
+  ) %>% summarize(
+    any_shot = sum(any_shot),
+    birth_count = sum(birth_count)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    coverage = any_shot/birth_count
+  )
+
+# create table for coverage from NIHE and HCDC data
+compare_cov <- coverage %>% 
+  full_join(
+    recompute_measles,
+    by = join_by(
+      qh == district, namsinh == birth_year
+    )
+  ) %>% 
+  filter(namsinh>2014 & namsinh < 2022) %>% 
+  select(namsinh, qh, coverage.x, coverage.y) %>% 
+  rename(
+    hcdc_coverage = coverage.x,
+    registry_coverage = coverage.y
+  )
+
+ggplotly(
+  ggplot(data=compare_cov) + 
+  geom_line(aes(x = namsinh, y=hcdc_coverage - registry_coverage, color = qh)) +
+  labs(
+    x = "Year of birth",
+    y = "HCDC coverage - Registry coverage"
+  ) 
+)
+```
+
+### Data table
+
+```{r, echo=FALSE}
+# create table for coverage from NIHE and HCDC data
+rmarkdown::paged_table(compare_cov) 
+```
+:::
+
+## Geo plot for coverage computed from HCDC data
+
+::: {.callout-warning appearance="simple"}
+## Map for Thu Duc
+
+I had some bug when trying to load map with merged Thu Duc city which have not been resolved so the coverage for Thu Duc in the following map is in fact coverage for Thu Duc district, District 2 and District 9
+:::
+
+```{ojs}
+//| echo: FALSE
+// prepare data
+import {addTooltips} from "@mkfreeman/plot-tooltip"
+Plot = import("https://cdn.jsdelivr.net/npm/@observablehq/plot/+esm")
+percent = d3.format(".2%")
+
+district_map = FileAttachment("data/gadm41_VNM_2.json").json();
+// only keep district of Ho Chi Minh city
+district_map.features = district_map.features.filter(
+ d => d.properties.NAME_1 == "HồChíMinh"
+)
+
+hcdc_coverage = FileAttachment("data/hcdc_coverage_data.csv").csv({typed: true});
+```
+
+```{ojs}
+//| echo: FALSE
+viewof year_select = Inputs.range([2016, 2024], 
+                                 {label: "Year of birth:", step: 1, value: 2024})
+```
+
+```{ojs}
+//| echo: FALSE
+
+filtered_cov = hcdc_coverage.filter((d) => d.namsinh === year_select)
+// create map from district to coverage
+district_cov_map = new Map(
+  filtered_cov.map( 
+    // fix names to mix that of map data
+  (d) => [
+    d.qh.normalize('NFD').replace(/[\u02c6-\u0323]/g, '')
+    .replace("Đ", "D").replace("Quan", "District").toLowerCase().
+    split(' ').join(''), 
+  d.coverage] ))
+// district_cov_map
+```
+
+```{ojs}
+//| echo: FALSE
+addTooltips(
+  Plot.plot({
+    projection: {type: "mercator", domain: district_map},
+    color: {
+        scheme: "blues",
+        label: "Coverage (%)",
+        legend: true,
+        percent: true, // Convert value to a percent (from a proportion)
+        domain: [0, 100] // Update the value domain to span 0 to 100% access
+      },
+    marks: [
+      Plot.geo(district_map, 
+      {
+        fill: (d) => district_cov_map.get(
+          // update district name to match that in the registry for mapping
+          d.properties.VARNAME_2.toLowerCase()
+          ),
+        title: (d) => `${d.properties.NAME_2}
+                    ${percent(district_cov_map.get(d.properties.VARNAME_2.toLowerCase()))}`
+      }),
+      Plot.geo(district_map, {stroke: "black", strokeWidth: 0.5})
+    ]
+  })
+)
+```

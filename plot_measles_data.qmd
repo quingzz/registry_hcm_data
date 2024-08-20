@@ -1,0 +1,161 @@
+---
+title: "Measles coverage in Ho Chi Minh"
+format: 
+  html:
+    embed-resources: true
+---
+
+```{r, output=FALSE}
+library(tidyverse)
+library(plotly)
+library(downloadthis)
+```
+
+## Download data
+
+```{r, echo = FALSE}
+measles_coverage <- read.csv("data/measles_coverage_data.csv")
+measles_coverage <- measles_coverage %>% mutate(age_group = factor(age_group)) %>% arrange(district)
+
+```
+
+```{r, echo=FALSE}
+download_this(
+  measles_coverage,
+  button_label = "Download measles coverage data",
+  output_name = "measles_coverage_data",
+  output_extension = ".rds",
+  button_type = "primary",
+  has_icon = TRUE,
+  icon = "fa fa-save"
+)
+```
+
+```{=html}
+<details>
+  <summary>
+    List of variables
+  </summary>
+```
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| Variable      | Description                                                                                                               |
++===============+===========================================================================================================================+
+| `birth_year`  | birth year of cohort                                                                                                      |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `district`    | residential address (24 districts of Ho Chi Minh city only)                                                               |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `any_shot`    | number of patients who were vaccinated at least 1 time                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `shots_1`     | number of patients who were vaccinated exactly 1 time                                                                     |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `shots_2`     | number of patients who were vaccinated exactly 2 times                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `shots_3`     | number of patients who were vaccinated exactly 3 times                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `birth_count` | number of newborns in `birth_year` (used as denominator for coverage)                                                     |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `coverage`    | proportion of newborns that were vaccinated for measles (i.e. `any_shot`/`birth_count`)                                   |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+| `age_group`   | Either `"[0-1)"` or `"all"`                                                                                               |
+|               |                                                                                                                           |
+|               | -   if `"[0-1)"` then shot variables (`any_shot`, `shots_1`, etc.) only count vaccination shots within 1 year since birth |
+|               |                                                                                                                           |
+|               | -   if `"[0-1)"` then shot variables count all vaccination shots recorded in registry                                     |
++---------------+---------------------------------------------------------------------------------------------------------------------------+
+
+\</details\>
+
+## Plot coverage over the year
+
+::: panel-tabset
+## Within one year of birth {.panel-tabset}
+
+```{r}
+ggplotly(
+  ggplot() + 
+    geom_line(
+      aes(x = birth_year, y = coverage, color = district), 
+      data = measles_coverage %>% filter(age_group == "[0-1)")
+    )
+)
+```
+
+## All
+
+```{r}
+ggplotly(
+  ggplot() + 
+    geom_line(
+      aes(x = birth_year, y = coverage, color = district), 
+      data = measles_coverage %>% filter(age_group == "all")
+    )
+)
+```
+:::
+
+## Geo plot
+
+```{ojs}
+//| echo: FALSE
+// prepare data
+import {addTooltips} from "@mkfreeman/plot-tooltip"
+Plot = import("https://cdn.jsdelivr.net/npm/@observablehq/plot/+esm")
+percent = d3.format(".2%")
+
+district_map = FileAttachment("data/gadm41_VNM_2.json").json();
+// only keep district of Ho Chi Minh city
+district_map.features = district_map.features.filter(
+  d => d.properties.NAME_1 == "HồChíMinh"
+)
+
+measles_coverage = FileAttachment("data/measles_coverage_data.csv").csv({typed: true});
+```
+
+```{ojs}
+//| echo: FALSE
+viewof year_select = Inputs.range([2015, 2021], 
+                                 {label: "Year of birth:", step: 1, value: 2021})
+viewof vacage_group = Inputs.select(["[0-1)", "all"], {label: "Age at vaccination:"})
+```
+
+```{ojs}
+//| echo: FALSE
+filtered_cov = measles_coverage.filter((d) => d.age_group === vacage_group & d.birth_year === year_select)
+
+district_cov_map = new Map(
+  filtered_cov.map( 
+    // fix names to mix that of map data
+  (d) => [
+    d.district.normalize('NFD').replace(/[\u02c6-\u0323]/g, '')
+    .replace("Đ", "D").replace("Quan", "District").toLowerCase().
+    split(' ').join(''), 
+  d.coverage] ))
+```
+
+```{ojs}
+//| echo: FALSE
+addTooltips(
+  Plot.plot({
+    projection: {type: "mercator", domain: district_map},
+    color: {
+        scheme: "blues",
+        label: "Coverage (%)",
+        legend: true,
+        percent: true, // Convert value to a percent (from a proportion)
+        domain: [0, 100] // Update the value domain to span 0 to 100% access
+      },
+    marks: [
+      Plot.geo(district_map, 
+      {
+        fill: (d) => district_cov_map.get(
+          // update district name to match that in the registry for mapping
+          d.properties.VARNAME_2.toLowerCase()
+          ),
+        title: (d) => `${d.properties.NAME_2}
+                    ${percent(district_cov_map.get(d.properties.VARNAME_2.toLowerCase()))}`
+      }),
+      Plot.geo(district_map, {stroke: "black", strokeWidth: 0.5})
+    ]
+  })
+)
+```

@@ -1,0 +1,105 @@
+---
+title: "Ho Chi Minh birth data"
+---
+
+```{r, output = FALSE, warnings=FALSE}
+# load libraries
+library(tidyverse)
+library(plotly)
+library(rlang)
+library(downloadthis)
+source("helpers.R")
+```
+
+## Download birth data
+
+```{r, echo=FALSE, output = FALSE}
+birth_data <- readRDS("data/hcm_birth_data.rds")
+```
+
+```{r, echo=FALSE}
+download_this(
+  birth_data,
+  button_label = "Download Ho Chi Minh birth data",
+  output_name = "hcm_birth_data",
+  output_extension = ".rds",
+  button_type = "primary",
+  has_icon = TRUE,
+  icon = "fa fa-save"
+)
+```
+
+```{=html}
+<details>
+  <summary>
+    List of variables
+  </summary>
+```
+| Variable          | Description                                                                |
+|-------------------|----------------------------------------------------------------------------|
+| `birth_week`      | week of birth (within a `birth_year`), value rangess from 1-53             |
+| `birth_year`      | year of birth                                                              |
+| `province_reg`    | registered province (residential address, only include "Hồ Chí Minh city") |
+| `district_reg`    | registered district (residential address)                                  |
+| `commune_reg`     | registered province (residential address)                                  |
+| `n`               | number of births                                                           |
+| `cumulative_week` | computed cumulative week for years after 2014                              |
+
+\</details\>
+
+## Plot number of newborns overtime
+
+::: panel-tabset
+## Concatenate by year
+
+```{r, warning=FALSE}
+plot_data <- compute_birth(birth_data, concatenate_by = "yearly")
+
+ggplotly(
+  plot_data$plot
+)
+```
+
+## Concatenate by week
+
+```{r, warning=FALSE}
+# compute birth at yearly, district level
+plot_data <- compute_birth(birth_data)
+
+ggplotly(
+  plot_data$plot
+)
+```
+:::
+
+## Plot number of births by year
+
+Check if there is any trend in the number of births within each year
+
+::: panel-tabset
+## Total
+
+```{r}
+ggplotly(
+  ggplot()+
+  geom_line(
+    aes(x = birth_week, y = no_birth),
+    color="royalblue1",
+    data = birth_data %>% group_by(birth_week) %>% summarize(no_birth = sum(n))
+  )
+)
+```
+
+## Per year
+
+```{r}
+# --- compute total birth by month ---- 
+ggplotly(
+  ggplot()+
+  geom_line(
+    aes(x = birth_week, y = no_birth, color = factor(birth_year) ),
+    data = birth_data %>% group_by(birth_week, birth_year) %>% summarize(no_birth = sum(n))
+  )
+)
+```
+:::
